@@ -2,123 +2,111 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"io/ioutil"
+	"net/http"
+	"sync"
+	"regexp"
+	"net/url"
 )
 
+var m sync.Map
+
 type Fetcher interface {
-	// Fetch returns the body of URL and
-	// a slice of URLs found on that page.
+	// Fetch returns the body of URL and a slice of URLs found on that page.
 	Fetch(url string) (body string, urls []string, err error)
 }
 
+// realFetcher implements the Fetcher interface.
+type realFetcher struct{}
 
-// SafeUrlMap is safe to use concurrently.
-type SafeUrlMap struct {
-    v   map[string]string
-    mux sync.Mutex
+func (f *realFetcher) Fetch(url string) (string, []string, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, fmt.Errorf("fetch failed with status: %s", resp.Status)
+	}
+
+	links := extractLinks(resp.Body)
+
+	return "", links, nil
 }
 
-func (c *SafeUrlMap) Set(key string, body string) {
-    c.mux.Lock()
-    // Lock so only one goroutine at a time can access the map c.v.
-    c.v[key] = body
-    c.mux.Unlock()
+func getBaseURL(rawurl string) (string, error) {
+	parsedURL, err := url.Parse(rawurl)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host), nil
 }
 
-// Value returns mapped value for the given key.
-func (c *SafeUrlMap) Value(key string) (string, bool) {
-    c.mux.Lock()
-    // Lock so only one goroutine at a time can access the map c.v.
-    defer c.mux.Unlock()
-    val, ok := c.v[key]
-    return val, ok
+// Regular expression to find links in HTML
+var linkRegex = regexp.MustCompile(`href=["'](https?://[^"']+)["']`)
+
+func extractLinks(body io.Reader) []string {
+    var links []string
+
+    // Read HTML content from the reader
+    htmlContent, err := ioutil.ReadAll(body)
+    if err != nil {
+        fmt.Println("Error reading HTML content:", err)
+        return links
+    }
+
+    // Find all matches of links in the HTML content
+    matches := linkRegex.FindAllStringSubmatch(string(htmlContent), -1)
+    for _, match := range matches {
+
+		baseURL, err := getBaseURL(match[1])
+		if err != nil {
+			continue
+		}
+
+        links = append(links, baseURL)
+    }
+
+    return links
 }
 
-// Crawl uses fetcher to recursively crawl
-// pages starting with url, to a maximum of depth.
-func Crawl(url string, depth int, fetcher Fetcher, urlMap SafeUrlMap) {
-    defer wg.Done()
-    urlMap.Set(url, body)
+// Crawl uses fetcher to recursively crawl pages starting with url, to a maximum of depth.
+func Crawl(url string, depth int, fetcher Fetcher) {
 
-    if depth <= 0 {
+	if depth <= 0 {
+		return
+	}
+
+	// Don't fetch the same URL twice.
+    _, ok := m.LoadOrStore(url, url)
+    if ok {
         return
     }
 
-    body, urls, err := fetcher.Fetch(url)
+	_, urls, err := fetcher.Fetch(url)
     if err != nil {
         fmt.Println(err)
         return
     }
 
-    for _, u := range urls {
-        if _, ok := urlMap.Value(u); !ok {
-            wg.Add(1)
-            go Crawl(u, depth-1, fetcher, urlMap)
-        }
-    }
+	fmt.Printf("found: %s\n", url)
 
-    return
+	var wg sync.WaitGroup
+    defer wg.Wait()
+	for _, u := range urls {
+		wg.Add(1)
+		go func(u string) {
+            defer wg.Done()
+            Crawl(u, depth-1, fetcher)
+        }(u)
+	}
+
+	return
 }
-
-var wg sync.WaitGroup
 
 func main() {
-    urlMap := SafeUrlMap{v: make(map[string]string)}
-
-	wg.Add(1)
-    go Crawl("http://golang.org/", 4, fetcher, urlMap)
-    wg.Wait()
-
-    for url := range urlMap.v {
-        body, _ := urlMap.Value(url)
-        fmt.Printf("found: %s %q\n", url, body)
-    }
-}
-
-// fakeFetcher is Fetcher that returns canned results.
-type fakeFetcher map[string]*result
-
-type result struct {
-	body string
-	urls []string
-}
-
-func (f fakeFetcher) Fetch(url string) (string, []string, error) {
-	if res, ok := f[url]; ok {
-		return res.body, res.urls, nil
-	}
-	return "", nil, fmt.Errorf("not found: %s", url)
-}
-
-// fetcher is a populated fakeFetcher.
-var fetcher = fakeFetcher{
-	"https://golang.org/": &result{
-		"The Go Programming Language",
-		[]string{
-			"https://golang.org/pkg/",
-			"https://golang.org/cmd/",
-		},
-	},
-	"https://golang.org/pkg/": &result{
-		"Packages",
-		[]string{
-			"https://golang.org/",
-			"https://golang.org/cmd/",
-			"https://golang.org/pkg/fmt/",
-			"https://golang.org/pkg/os/",
-		},
-	},
-	"https://golang.org/pkg/fmt/": &result{
-		"Package fmt",
-		[]string{
-			"https://golang.org/",
-			"https://golang.org/pkg/",
-		},
-	},
-	"https://golang.org/pkg/os/": &result{
-		"Package os",
-		[]string{
-			"https://golang.org/",
-			"https://golang.org/pkg/",
-		},
-	},
+	fmt.Println("crawling")
+	Crawl("https://golang.org/", 100, &realFetcher{})
 }
