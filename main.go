@@ -60,7 +60,6 @@ func extractLinks(body io.Reader) []string {
     // Find all matches of links in the HTML content
     matches := linkRegex.FindAllStringSubmatch(string(htmlContent), -1)
     for _, match := range matches {
-
 		baseURL, err := getBaseURL(match[1])
 		if err != nil {
 			continue
@@ -95,6 +94,7 @@ func Crawl(url string, depth int, fetcher Fetcher) {
 
 	var wg sync.WaitGroup
     defer wg.Wait()
+	
 	for _, u := range urls {
 		wg.Add(1)
 		go func(u string) {
